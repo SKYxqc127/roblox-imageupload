@@ -171,25 +171,37 @@ static std::string httpErrJson(int code, const std::string& msg) {
 }
 
 ImageData loadImageToMatrix(const std::string& url, int resize) {
+    // ✅ อนุญาตเฉพาะลิงก์รูปจาก Discord เท่านั้น
+    if (!(url.rfind("https://cdn.discordapp.com/", 0) == 0 ||
+          url.rfind("https://media.discordapp.net/", 0) == 0)) {
+        throw std::runtime_error("Only Discord image links are allowed");
+    }
+
+    // ✅ ตรวจสอบว่านามสกุลไฟล์ถูกต้อง (.png, .jpg, .jpeg)
+    std::string lower = url;
+    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+    if (!(lower.ends_with(".png") || lower.ends_with(".jpg") || lower.ends_with(".jpeg"))) {
+        throw std::runtime_error("Only .png or .jpg images are allowed");
+    }
+
     std::string tmp = "/tmp/image.bin";
     if (!downloadImage(url, tmp)) throw std::runtime_error("download failed");
 
-    int w,h,c;
+    int w, h, c;
     unsigned char* src = stbi_load(tmp.c_str(), &w, &h, &c, 3);
     if (!src) throw std::runtime_error("stbi_load failed");
 
-    int target = resize > 0 ? resize : std::min(w,h);
+    int target = resize > 0 ? resize : std::min(w, h);
     target = std::max(8, std::min(256, target));
 
     std::vector<unsigned char> pixels;
     if (w != target || h != target) {
         pixels.resize(target * target * 3);
-        // legacy stb_image_resize API: specify num_channels=3
         int ok = stbir_resize_uint8(src, w, h, 0, pixels.data(), target, target, 0, 3);
         stbi_image_free(src);
         if (!ok) throw std::runtime_error("resize failed");
     } else {
-        pixels.assign(src, src + w*h*3);
+        pixels.assign(src, src + w * h * 3);
         stbi_image_free(src);
         target = w;
     }
@@ -198,15 +210,17 @@ ImageData loadImageToMatrix(const std::string& url, int resize) {
     out.width = target;
     out.height = target;
     out.pixels.resize(target, std::vector<std::vector<uint8_t>>(target, std::vector<uint8_t>(3)));
-    for (int y=0; y<target; ++y) {
-        for (int x=0; x<target; ++x) {
-            out.pixels[y][x][0] = pixels[(y*target + x)*3 + 0];
-            out.pixels[y][x][1] = pixels[(y*target + x)*3 + 1];
-            out.pixels[y][x][2] = pixels[(y*target + x)*3 + 2];
+    for (int y = 0; y < target; ++y) {
+        for (int x = 0; x < target; ++x) {
+            out.pixels[y][x][0] = pixels[(y * target + x) * 3 + 0];
+            out.pixels[y][x][1] = pixels[(y * target + x) * 3 + 1];
+            out.pixels[y][x][2] = pixels[(y * target + x) * 3 + 2];
         }
     }
+
     return out;
 }
+
 
 std::string toJson(const ImageData& img) {
     std::ostringstream s;
