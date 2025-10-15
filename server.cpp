@@ -174,13 +174,17 @@ ImageData loadImageToMatrix(const std::string& url, int resize) {
     // ✅ อนุญาตเฉพาะลิงก์รูปจาก Discord เท่านั้น
     if (!(url.rfind("https://cdn.discordapp.com/", 0) == 0 ||
           url.rfind("https://media.discordapp.net/", 0) == 0)) {
+        std::cerr << "❌ Blocked non-Discord URL: " << url << std::endl;
         throw std::runtime_error("Only Discord image links are allowed");
     }
 
     // ✅ ตรวจสอบว่านามสกุลไฟล์ถูกต้อง (.png, .jpg, .jpeg)
     std::string lower = url;
     std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
-    if (!(lower.ends_with(".png") || lower.ends_with(".jpg") || lower.ends_with(".jpeg"))) {
+    if (!(lower.find(".png") != std::string::npos ||
+          lower.find(".jpg") != std::string::npos ||
+          lower.find(".jpeg") != std::string::npos)) {
+        std::cerr << "❌ Blocked unsupported format: " << url << std::endl;
         throw std::runtime_error("Only .png or .jpg images are allowed");
     }
 
@@ -220,6 +224,7 @@ ImageData loadImageToMatrix(const std::string& url, int resize) {
 
     return out;
 }
+
 
 
 std::string toJson(const ImageData& img) {
