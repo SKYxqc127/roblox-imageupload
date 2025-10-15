@@ -1,0 +1,13 @@
+# Build artifacts
+server
+*.o
+*.obj
+*.pdb
+*.ilk
+*.exe
+*.dll
+*.lib
+*.log
+.vscode/
+.idea/
+.DS_Store
