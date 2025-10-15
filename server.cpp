@@ -32,21 +32,66 @@ static size_t CurlWriteToFile(void* contents, size_t size, size_t nmemb, void* u
 
 bool downloadImage(const std::string& url, const std::string& path) {
     CURL* curl = curl_easy_init();
-    if (!curl) return false;
+    if (!curl) {
+        std::cerr << "❌ curl init failed" << std::endl;
+        return false;
+    }
 
     std::ofstream ofs(path, std::ios::binary);
-    if (!ofs.is_open()) { curl_easy_cleanup(curl); return false; }
+    if (!ofs.is_open()) {
+        std::cerr << "❌ cannot open file for writing: " << path << std::endl;
+        curl_easy_cleanup(curl);
+        return false;
+    }
 
+    // ตั้งค่า curl
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-    curl_easy_setopt(curl, CURLOPT_USERAGENT, "RobloxImageProxy/1.0");
+    curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 5L);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 20L);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, CurlWriteToFile);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &ofs);
+    curl_easy_setopt(curl, CURLOPT_FAILONERROR, 0L);
+
+    // ✅ จำลอง browser จริง เพื่อหลอก Imgur / Discord CDN / Pinterest
+    curl_easy_setopt(curl, CURLOPT_USERAGENT,
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/123.0 Safari/537.36");
+
+    curl_easy_setopt(curl, CURLOPT_REFERER, "https://imgur.com/");
+    curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_2TLS);
+
+    // ✅ ปิด SSL verify (แก้ปัญหาใบรับรองใน Render)
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
+
     CURLcode res = curl_easy_perform(curl);
     curl_easy_cleanup(curl);
     ofs.close();
-    return (res == CURLE_OK);
+
+    if (res != CURLE_OK) {
+        std::cerr << "❌ curl_easy_perform failed: "
+                  << curl_easy_strerror(res)
+                  << " for URL: " << url << std::endl;
+        return false;
+    }
+
+    // ตรวจสอบขนาดไฟล์หลังโหลด
+    std::ifstream check(path, std::ios::binary | std::ios::ate);
+    if (!check.is_open() || check.tellg() == 0) {
+        std::cerr << "❌ downloaded file empty or invalid ("
+                  << url << ")" << std::endl;
+        check.close();
+        return false;
+    }
+
+    check.close();
+    std::cout << "✅ Download OK: " << url << std::endl;
+    return true;
 }
+
 
 static std::string urlDecode(const std::string& s) {
     std::string out;
