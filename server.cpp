@@ -178,19 +178,30 @@ ImageData loadImageToMatrix(const std::string& url, int resize) {
         throw std::runtime_error("Only Discord image links are allowed");
     }
 
-    // ✅ ตรวจสอบว่านามสกุลไฟล์ถูกต้อง (.png, .jpg, .jpeg)
+    // ✅ ตรวจสอบนามสกุลที่อนุญาต (.png, .jpg, .jpeg, หรือ format=webp)
     std::string lower = url;
     std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
     if (!(lower.find(".png") != std::string::npos ||
           lower.find(".jpg") != std::string::npos ||
-          lower.find(".jpeg") != std::string::npos)) {
+          lower.find(".jpeg") != std::string::npos ||
+          lower.find("format=webp") != std::string::npos)) {
         std::cerr << "❌ Blocked unsupported format: " << url << std::endl;
-        throw std::runtime_error("Only .png or .jpg images are allowed");
+        throw std::runtime_error("Only PNG or JPG (or Discord WebP auto-convert) allowed");
     }
 
-    std::string tmp = "/tmp/image.bin";
-    if (!downloadImage(url, tmp)) throw std::runtime_error("download failed");
+    // ✅ ถ้าเป็น Discord แล้วมี format=webp → แปลงให้เป็น format=png
+    std::string fixedUrl = url;
+    size_t pos = fixedUrl.find("format=webp");
+    if (pos != std::string::npos) {
+        fixedUrl.replace(pos, 11, "format=png");
+        std::cerr << "⚙️ Auto-converted Discord WebP → PNG: " << fixedUrl << std::endl;
+    }
 
+    // ✅ ดาวน์โหลดรูปไปเก็บใน /tmp
+    std::string tmp = "/tmp/image.bin";
+    if (!downloadImage(fixedUrl, tmp)) throw std::runtime_error("download failed");
+
+    // ✅ โหลดภาพด้วย stb_image
     int w, h, c;
     unsigned char* src = stbi_load(tmp.c_str(), &w, &h, &c, 3);
     if (!src) throw std::runtime_error("stbi_load failed");
@@ -210,10 +221,12 @@ ImageData loadImageToMatrix(const std::string& url, int resize) {
         target = w;
     }
 
+    // ✅ แปลงข้อมูลภาพเป็น Pixel Matrix
     ImageData out;
     out.width = target;
     out.height = target;
     out.pixels.resize(target, std::vector<std::vector<uint8_t>>(target, std::vector<uint8_t>(3)));
+
     for (int y = 0; y < target; ++y) {
         for (int x = 0; x < target; ++x) {
             out.pixels[y][x][0] = pixels[(y * target + x) * 3 + 0];
@@ -222,10 +235,9 @@ ImageData loadImageToMatrix(const std::string& url, int resize) {
         }
     }
 
+    std::cout << "✅ Image processed: " << target << "x" << target << std::endl;
     return out;
 }
-
-
 
 std::string toJson(const ImageData& img) {
     std::ostringstream s;
