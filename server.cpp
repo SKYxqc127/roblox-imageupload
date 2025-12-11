@@ -1,221 +1,237 @@
+// ====================
+//   Image Parser API
+//   With Cache + Pixel JSON
+// ====================
+
 #include <iostream>
 #include <vector>
 #include <string>
 #include <fstream>
 #include <sstream>
-#include <cstring>
-#include <cstdlib>
-#include <algorithm>
+#include <unordered_map>
+#include <filesystem>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <curl/curl.h>
-#include <sys/stat.h>
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "third_party/stb/stb_image.h"
 #define STB_IMAGE_RESIZE_IMPLEMENTATION
 #include "third_party/stb/stb_image_resize.h"
 
-// ---------------------------------------------------------------------
-// Hash helper (simple)
-// ---------------------------------------------------------------------
-std::string simpleHash(const std::string& s) {
-    unsigned long h = 5381;
-    for (char c : s) h = ((h << 5) + h) + (unsigned char)c;
-    return std::to_string(h);
-}
+namespace fs = std::filesystem;
 
-// ---------------------------------------------------------------------
-// Download helper
-// ---------------------------------------------------------------------
-static size_t CurlWriteToFile(void* contents, size_t size, size_t nmemb, void* userp) {
-    std::ofstream* ofs = static_cast<std::ofstream*>(userp);
-    ofs->write(static_cast<char*>(contents), size * nmemb);
+
+// temp cache folder
+const std::string CACHE_DIR = "/tmp/imgcache";
+
+
+// ========== CURL download ==========
+static size_t CurlWrite(void* contents, size_t size, size_t nmemb, void* userp) {
+    std::vector<unsigned char>* buf = (std::vector<unsigned char>*)userp;
+    buf->insert(buf->end(), (unsigned char*)contents, (unsigned char*)contents + size * nmemb);
     return size * nmemb;
 }
 
-bool downloadImage(const std::string& url, const std::string& path) {
+bool downloadFile(const std::string& url, std::vector<unsigned char>& out) {
     CURL* curl = curl_easy_init();
     if (!curl) return false;
 
-    std::ofstream ofs(path, std::ios::binary);
-    if (!ofs.is_open()) {
-        curl_easy_cleanup(curl);
-        return false;
-    }
-
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-    curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 5L);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 20L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 15L);
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, CurlWriteToFile);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &ofs);
-    curl_easy_setopt(curl, CURLOPT_USERAGENT, "Mozilla/5.0");
-
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, CurlWrite);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &out);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
 
     CURLcode res = curl_easy_perform(curl);
     curl_easy_cleanup(curl);
-    ofs.close();
 
-    if (res != CURLE_OK) return false;
-
-    std::ifstream check(path, std::ios::binary | std::ios::ate);
-    return check.is_open() && check.tellg() > 10;
+    return (res == CURLE_OK);
 }
 
-// ---------------------------------------------------------------------
-// Decode + resize
-// ---------------------------------------------------------------------
-std::string processImage(const std::string& srcPath, const std::string& cachePath, int resizeTo) {
+
+// ========== Convert image → pixel matrix & JSON ==========
+std::string convertImageToJson(const std::vector<unsigned char>& data, int resize) {
     int w, h, ch;
 
-    unsigned char* src = stbi_load(srcPath.c_str(), &w, &h, &ch, 3);
+    unsigned char* src = stbi_load_from_memory(
+        data.data(), data.size(), &w, &h, &ch, 3
+    );
     if (!src) throw std::runtime_error("decode failed");
 
-    std::vector<unsigned char> outbuf(resizeTo * resizeTo * 3);
+    // Resize
+    int t = resize;
+    std::vector<unsigned char> out(t * t * 3);
 
-    if (!stbir_resize_uint8(src, w, h, 0, outbuf.data(), resizeTo, resizeTo, 0, 3)) {
-        stbi_image_free(src);
-        throw std::runtime_error("resize failed");
-    }
-
+    stbir_resize_uint8(src, w, h, 0, out.data(), t, t, 0, 3);
     stbi_image_free(src);
 
-    // Save cache PNG
-    std::ofstream out(cachePath, std::ios::binary);
-    if (!out.is_open()) throw std::runtime_error("cannot write cache");
+    // Build JSON string manually
+    std::ostringstream json;
 
-    // Write raw RGB (Roblox code expects raw pixels in JSON, not PNG)
-    for (unsigned char c : outbuf) out.put(c);
+    json << "{";
+    json << "\"width\":" << t << ",";
+    json << "\"height\":" << t << ",";
+    json << "\"pixels\":{";
 
-    return cachePath;
-}
+    for (int y = 0; y < t; y++) {
+        json << "\"" << (y + 1) << "\":{";
 
-// ---------------------------------------------------------------------
-// Query parsing
-// ---------------------------------------------------------------------
-struct Query { std::string imageUrl; int resize = 64; };
+        for (int x = 0; x < t; x++) {
+            int idx = (y * t + x) * 3;
+            int r = out[idx];
+            int g = out[idx + 1];
+            int b = out[idx + 2];
 
-std::string urlDecode(const std::string& s) {
-    std::string out;
-    for (size_t i = 0; i < s.size(); ++i) {
-        if (s[i] == '%' && i + 2 < s.size()) {
-            int v;
-            std::stringstream ss;
-            ss << std::hex << s.substr(i + 1, 2);
-            ss >> v;
-            out.push_back((char)v);
-            i += 2;
-        } else if (s[i] == '+') out.push_back(' ');
-        else out.push_back(s[i]);
-    }
-    return out;
-}
+            json << "\"" << (x + 1) << "\":[" << r << "," << g << "," << b << "]";
+            if (x + 1 < t) json << ",";
+        }
 
-Query parseQuery(const std::string& req) {
-    size_t a = req.find("GET ");
-    size_t b = req.find(" HTTP/");
-    std::string full = req.substr(a + 4, b - (a + 4));
-
-    size_t qm = full.find('?');
-    if (qm == std::string::npos) return {};
-
-    std::string qs = full.substr(qm + 1);
-    Query q;
-    std::stringstream ss(qs);
-    std::string kv;
-
-    while (std::getline(ss, kv, '&')) {
-        size_t eq = kv.find('=');
-        std::string k = urlDecode(kv.substr(0, eq));
-        std::string v = urlDecode(kv.substr(eq + 1));
-
-        if (k == "url") q.imageUrl = v;
-        else if (k == "resize") q.resize = std::stoi(v);
+        json << "}";
+        if (y + 1 < t) json << ",";
     }
 
-    return q;
+    json << "}}";
+
+    return json.str();
 }
 
-// ---------------------------------------------------------------------
-// JSON response wrapper
-// ---------------------------------------------------------------------
-std::string jsonReply(const std::string& body) {
+
+// ========== Cache helpers ==========
+std::string urlToKey(const std::string& url) {
+    std::hash<std::string> h;
+    return std::to_string(h(url));
+}
+
+std::string getCachePath(const std::string& key) {
+    return CACHE_DIR + "/" + key + ".json";
+}
+
+bool cacheExists(const std::string& key) {
+    return fs::exists(getCachePath(key));
+}
+
+std::string readCache(const std::string& key) {
+    std::ifstream f(getCachePath(key));
     std::stringstream ss;
-    ss << "HTTP/1.1 200 OK\r\n"
-       << "Access-Control-Allow-Origin: *\r\n"
-       << "Content-Type: application/json\r\n"
-       << "Connection: close\r\n"
-       << "Content-Length: " << body.size()
-       << "\r\n\r\n" << body;
+    ss << f.rdbuf();
     return ss.str();
 }
 
-// ---------------------------------------------------------------------
-// MAIN server
-// ---------------------------------------------------------------------
-int main() {
-    mkdir("/tmp/cache", 0777); // create cache folder
+void saveCache(const std::string& key, const std::string& json) {
+    fs::create_directories(CACHE_DIR);
+    std::ofstream f(getCachePath(key));
+    f << json;
+}
 
+
+// ========== HTTP response helpers ==========
+std::string httpJson(const std::string& body) {
+    std::ostringstream o;
+    o << "HTTP/1.1 200 OK\r\n"
+      << "Content-Type: application/json\r\n"
+      << "Access-Control-Allow-Origin: *\r\n"
+      << "Connection: close\r\n"
+      << "Content-Length: " << body.size() << "\r\n\r\n"
+      << body;
+    return o.str();
+}
+
+std::string httpErr(const std::string& msg) {
+    std::string b = "{\"error\":\"" + msg + "\"}";
+    std::ostringstream o;
+    o << "HTTP/1.1 500 Error\r\n"
+      << "Content-Type: application/json\r\n"
+      << "Access-Control-Allow-Origin: *\r\n"
+      << "Connection: close\r\n"
+      << "Content-Length: " << b.size() << "\r\n\r\n"
+      << b;
+    return o.str();
+}
+
+
+// ========== MAIN SERVER ==========
+int main() {
     int port = 8787;
     int server = socket(AF_INET, SOCK_STREAM, 0);
+    int opt = 1;
 
-    sockaddr_in addr {};
+    setsockopt(server, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
     addr.sin_addr.s_addr = INADDR_ANY;
 
     bind(server, (sockaddr*)&addr, sizeof(addr));
-    listen(server, 16);
+    listen(server, 10);
+
+    std::cout << "Image API ready on :" << port << "\n";
 
     while (true) {
         int client = accept(server, nullptr, nullptr);
         if (client < 0) continue;
 
         char buf[4096];
-        int n = read(client, buf, 4095);
-        if (n <= 0) { close(client); continue; }
-        buf[n] = 0;
+        int n = read(client, buf, sizeof(buf));
+        if (n <= 0) {
+            close(client);
+            continue;
+        }
 
+        std::string req(buf, n);
+
+        // parse ?url=
+        size_t qs = req.find("?url=");
+        if (qs == std::string::npos) {
+            std::string msg = httpErr("missing url");
+            write(client, msg.c_str(), msg.size());
+            close(client);
+            continue;
+        }
+
+        size_t end = req.find(" ", qs);
+        std::string url = req.substr(qs + 5, end - (qs + 5));
+
+        int resize = 64;
+
+        // 1) CACHE CHECK
+        std::string key = urlToKey(url);
+
+        if (cacheExists(key)) {
+            std::string body = readCache(key);
+            std::string res = httpJson(body);
+            write(client, res.c_str(), res.size());
+            close(client);
+            continue;
+        }
+
+        // 2) DOWNLOAD IMAGE
+        std::vector<unsigned char> file;
+        if (!downloadFile(url, file)) {
+            std::string res = httpErr("download failed");
+            write(client, res.c_str(), res.size());
+            close(client);
+            continue;
+        }
+
+        // 3) CONVERT TO JSON
         try {
-            Query q = parseQuery(buf);
-            if (q.imageUrl.empty()) {
-                std::string rep = jsonReply("{\"error\":\"no url\"}");
-                write(client, rep.c_str(), rep.size());
-                close(client);
-                continue;
-            }
+            std::string json = convertImageToJson(file, resize);
 
-            int size = std::max(8, std::min(256, q.resize));
-            std::string key = simpleHash(q.imageUrl + "_" + std::to_string(size));
-            std::string cachePath = "/tmp/cache/" + key + ".raw";
+            // save cache
+            saveCache(key, json);
 
-            // If cached → use it
-            struct stat st;
-            if (stat(cachePath.c_str(), &st) == 0) {
-                std::string rep = jsonReply("{\"cache\":true,\"path\":\"" + cachePath + "\"}");
-                write(client, rep.c_str(), rep.size());
-                close(client);
-                continue;
-            }
-
-            // Download fresh
-            std::string tmp = "/tmp/dl.bin";
-            if (!downloadImage(q.imageUrl, tmp))
-                throw std::runtime_error("download failed");
-
-            processImage(tmp, cachePath, size);
-
-            std::string rep = jsonReply("{\"cache\":false,\"path\":\"" + cachePath + "\"}");
-            write(client, rep.c_str(), rep.size());
+            std::string res = httpJson(json);
+            write(client, res.c_str(), res.size());
         }
         catch (std::exception& e) {
-            std::string rep = jsonReply(std::string("{\"error\":\"") + e.what() + "\"}");
-            write(client, rep.c_str(), rep.size());
+            std::string res = httpErr(e.what());
+            write(client, res.c_str(), res.size());
         }
 
         close(client);
